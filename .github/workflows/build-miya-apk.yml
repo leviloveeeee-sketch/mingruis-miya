@@ -1,0 +1,99 @@
+name: Build Miya Phone APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Prepare web assets and Capacitor Android project
+        run: |
+          set -euo pipefail
+          mkdir -p www
+          cp -r index.html manifest.json sw.js css img js1 js2 www/
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.miya.floatphone",
+            "appName": "Miya小手机",
+            "webDir": "www",
+            "server": {
+              "androidScheme": "https",
+              "hostname": "localhost"
+            },
+            "android": {
+              "allowMixedContent": true,
+              "backgroundColor": "#ffffff"
+            }
+          }
+          EOF
+          npx cap add android
+          npx cap sync android
+
+      - name: Apply Miya app icon
+        run: |
+          set -euo pipefail
+          rm -rf android/app/src/main/res/mipmap-anydpi-v26
+          for dir in android/app/src/main/res/mipmap-*dpi; do
+            cp img/miya-icon-512.png "$dir/ic_launcher.png"
+            cp img/miya-icon-512.png "$dir/ic_launcher_round.png"
+            cp img/miya-icon-512.png "$dir/ic_launcher_foreground.png"
+          done
+
+      - name: Build and sign Release APK
+        run: |
+          set -euo pipefail
+          cd android
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          cd ..
+          BUILD_TOOLS_DIR=$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)
+          mkdir -p apk-output
+          keytool -genkeypair -v \
+            -keystore apk-output/miya-release.jks \
+            -storepass miya-personal-key \
+            -keypass miya-personal-key \
+            -alias miya \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=MiyaPhone, OU=Personal, O=Personal, L=Beijing, ST=Beijing, C=CN"
+          "$BUILD_TOOLS_DIR/zipalign" -p -f 4 \
+            android/app/build/outputs/apk/release/app-release-unsigned.apk \
+            apk-output/Miya-Phone-aligned.apk
+          "$BUILD_TOOLS_DIR/apksigner" sign \
+            --ks apk-output/miya-release.jks \
+            --ks-pass pass:miya-personal-key \
+            --key-pass pass:miya-personal-key \
+            --ks-key-alias miya \
+            --out apk-output/Miya-Phone-release.apk \
+            apk-output/Miya-Phone-aligned.apk
+          "$BUILD_TOOLS_DIR/apksigner" verify --verbose apk-output/Miya-Phone-release.apk
+          rm -f apk-output/Miya-Phone-aligned.apk apk-output/Miya-Phone-release.apk.idsig
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Miya-Phone-release
+          path: |
+            apk-output/Miya-Phone-release.apk
+            apk-output/miya-release.jks
+          if-no-files-found: error
+          retention-days: 7
